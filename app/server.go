@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	// Uncomment this block to pass the first stage
@@ -14,6 +16,8 @@ import (
 	"strconv"
 	"time"
 )
+
+var BASE_64_EMPTY_RDB_STR string
 
 type RedisStrValue struct {
 	has_expiry bool
@@ -114,6 +118,20 @@ func parseString(conn net.Conn, num_chars int) string {
 	return "invalid command"
 }
 
+func readNChars(conn net.Conn, n int) string {
+	data := "a"
+	data_bytes := []byte(data)
+	command := []byte("")
+	for i := 0; i < n; i++ {
+		_, err := conn.Read(data_bytes)
+		if err != nil {
+			fmt.Println("Failure to read from connection: ", err.Error())
+			os.Exit(1)
+		}
+	}
+	return string(command)
+}
+
 // write a RESP simple string
 func writeConn(conn net.Conn, s string) {
 	response_str := "+" + s + "\r\n"
@@ -152,6 +170,57 @@ func writeConnWithServerState(conn net.Conn, ss ServerState) {
 	}
 }
 
+func calcRdbLength(length []byte) int {
+	i, err := strconv.Atoi(string(length[1 : len(length)-2]))
+	if err != nil {
+		fmt.Println("Failure to convert to int: ", err.Error())
+		os.Exit(1)
+	}
+	return i
+}
+
+// only supports empty rdb files
+func readRdbFile(conn net.Conn) {
+	// read the length
+	response, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		fmt.Println("Error reading response:", err)
+		return
+	}
+
+	i := calcRdbLength([]byte(response))
+
+	readNChars(conn, i)
+
+}
+
+func generateEmptyRDB() ([]byte, []byte) {
+	decodedData, err := base64.StdEncoding.DecodeString(BASE_64_EMPTY_RDB_STR)
+	if err != nil {
+		log.Fatalf("Failed to decode Base64: %v", err)
+	}
+
+	content_length_s := strconv.Itoa(len(decodedData))
+	content_length := []byte(content_length_s)
+	var length []byte = append(append([]byte("$"), content_length...), []byte("\r\n")...)
+	return length, decodedData
+}
+
+func writeEmptyRdbFile(conn net.Conn) {
+	length, decodedData := generateEmptyRDB()
+	_, err := conn.Write(length)
+	if err != nil {
+		fmt.Println("Failure to write response: ", err.Error())
+		os.Exit(1)
+	}
+
+	_, err = conn.Write(decodedData)
+	if err != nil {
+		fmt.Println("Failure to write response: ", err.Error())
+		os.Exit(1)
+	}
+}
+
 func handleInvalidNumParams(givenNumParams int, expectedNumParams int) {
 	if givenNumParams != expectedNumParams {
 		fmt.Println("A psync command must have 3 params")
@@ -159,10 +228,24 @@ func handleInvalidNumParams(givenNumParams int, expectedNumParams int) {
 	}
 }
 
+func propagateCommand(serverState ServerState, command string) {
+	for _, v := range serverState.slave_addrs {
+		conn, err := net.Dial("tcp", v)
+
+		if err != nil {
+			fmt.Println("Error connecting:", err)
+			return
+		}
+		writeConn(conn, command)
+
+		defer conn.Close()
+	}
+}
+
 func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerState) {
 	for {
+		fmt.Println("Starting to read a new command")
 		num_params := handleFirstLine(conn)
-		fmt.Println("Read this number of params: ", strconv.Itoa(num_params))
 		if num_params == -1 {
 			fmt.Println("Invalid num params input")
 			os.Exit(1)
@@ -171,9 +254,8 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 			return
 		}
 		num_chars := ReadNumCharsNextLine(conn)
-		fmt.Println("Read this number of chars: ", strconv.Itoa(num_chars))
 		if num_chars == -1 {
-			fmt.Println("Invalid num charsinput")
+			fmt.Println("Invalid num chars input")
 			os.Exit(1)
 		}
 		command := parseCommand(conn, num_chars)
@@ -246,6 +328,10 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 		case "psync":
 			handleInvalidNumParams(num_params, 3)
 			writeConn(conn, fmt.Sprintf("FULLRESYNC %s 0", serverState.master_replid))
+			fmt.Printf("start empty rdb write: %s\n", conn.RemoteAddr())
+			writeEmptyRdbFile(conn)
+			serverState.slave_addrs = append(serverState.slave_addrs, conn.RemoteAddr().String())
+			fmt.Printf("%v\n", serverState.slave_addrs)
 		case "set":
 			if !(num_params == 3 || num_params == 5) {
 				fmt.Println("invalid # of params for set command")
@@ -257,8 +343,15 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 			s2 := parseString(conn, num_chars)
 			if num_params == 3 {
 				m[s1] = RedisStrValue{value: s2}
-				writeConn(conn, "OK")
-			} else {
+
+				if serverState.role == "master" {
+					writeConn(conn, "OK")
+					propagateCommand(
+						serverState,
+						fmt.Sprintf("*3\r\n$3\r\nSET\r\n$%s\r\n%s\r\n$%s\r\n%s", strconv.Itoa(len(s1)), s1, strconv.Itoa(len(s2)), s2),
+					)
+				}
+			} else { // set expiry time
 				num_chars = ReadNumCharsNextLine(conn)
 				fmt.Println("Read this number of chars: ", strconv.Itoa(num_chars))
 				arg := parseString(conn, num_chars)
@@ -284,7 +377,15 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 					m[s1] = RedisStrValue{has_expiry: true, expiry: isoTimestamp, value: s2}
 					fmt.Println("Saving this entry:")
 					fmt.Printf("%+v\n", m[s1])
-					writeConn(conn, "OK")
+					if serverState.role == "master" {
+						writeConn(conn, "OK")
+						s3 := arg
+						s4 := expiry_ms
+						propagateCommand(
+							serverState,
+							fmt.Sprintf("*%d\r\n$3\r\nSET\r\n$%s\r\n%s\r\n$%s\r\n%s\r\n$%s\r\n%s\r\n$%s\r\n%s", num_params, strconv.Itoa(len(s1)), s1, strconv.Itoa(len(s2)), s2, strconv.Itoa(len(s3)), s3, strconv.Itoa(len(s4)), s4),
+						)
+					}
 				default:
 					fmt.Println("invalid argument: ", arg)
 					os.Exit(1)
@@ -322,6 +423,7 @@ type ServerState struct {
 	role               string
 	master_replid      string
 	master_repl_offset string
+	slave_addrs        []string
 }
 
 func main() {
@@ -330,6 +432,7 @@ func main() {
 	var port = flag.String("port", "6379", "help message for flag port")
 	var replicaOf = flag.String("replicaof", "", "help message for flag replicaof")
 	flag.Parse()
+	BASE_64_EMPTY_RDB_STR = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
 
 	role := "master"
 	var serverState ServerState
