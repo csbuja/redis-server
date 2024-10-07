@@ -1,0 +1,19 @@
+{
+    // "go.gopath": "/Users/spencerb/go",  // Set GOPATH
+    // "go.goroot": "/Users/spencerb/go",  // Set GOROOT if needed
+    // "go.alternateTools": {
+    //     "go": "/Users/spencerb/go/bin/go"  // Custom Go executable path
+    // },
+    // "go.useLanguageServer": true,  // Use Go language server for better features
+    // "go.toolsEnvVars": {
+    //     "GO111MODULE": "on"  // Enable Go modules if required
+    // },
+    // "go.formatTool": "gofmt",  // Format Go code with 'gofmt'
+    // "go.lintTool": "golint",  // Use 'golint' for linting Go code
+    // "go.testFlags": ["-v"],  // Verbose test output
+    // "go.buildOnSave": "workspace",  // Build workspace on save
+    // "go.coverageDecorator": {
+    //     "type": "gutter"  // Show coverage in the gutter
+    // },
+    // "go.testOnSave": true  // Run tests automatically on save
+}

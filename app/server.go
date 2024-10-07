@@ -114,6 +114,7 @@ func parseString(conn net.Conn, num_chars int) string {
 	return "invalid command"
 }
 
+// write a RESP simple string
 func writeConn(conn net.Conn, s string) {
 	response_str := "+" + s + "\r\n"
 	response_bytes := []byte(response_str)
@@ -151,6 +152,13 @@ func writeConnWithServerState(conn net.Conn, ss ServerState) {
 	}
 }
 
+func handleInvalidNumParams(givenNumParams int, expectedNumParams int) {
+	if givenNumParams != expectedNumParams {
+		fmt.Println("A psync command must have 3 params")
+		os.Exit(1)
+	}
+}
+
 func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerState) {
 	for {
 		num_params := handleFirstLine(conn)
@@ -173,10 +181,12 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 
 		switch command {
 		case "echo":
+			handleInvalidNumParams(num_params, 2)
 			num_chars = ReadNumCharsNextLine(conn)
 			s := parseString(conn, num_chars)
 			writeConn(conn, s)
 		case "ping":
+			handleInvalidNumParams(num_params, 1)
 			writeConn(conn, "PONG")
 		case "info":
 			num_chars = ReadNumCharsNextLine(conn)
@@ -233,6 +243,9 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 					os.Exit(1)
 				}
 			}
+		case "psync":
+			handleInvalidNumParams(num_params, 3)
+			writeConn(conn, fmt.Sprintf("FULLRESYNC %s 0", serverState.master_replid))
 		case "set":
 			if !(num_params == 3 || num_params == 5) {
 				fmt.Println("invalid # of params for set command")
