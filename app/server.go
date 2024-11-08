@@ -229,15 +229,8 @@ func handleInvalidNumParams(givenNumParams int, expectedNumParams int) {
 }
 
 func propagateCommand(serverState ServerState, command string) {
-	for _, v := range serverState.slave_addrs {
-		conn, err := net.Dial("tcp", v)
-
-		if err != nil {
-			fmt.Println("Error connecting:", err)
-			return
-		}
+	for _, conn := range serverState.slave_conns {
 		writeConn(conn, command)
-
 		defer conn.Close()
 	}
 }
@@ -330,8 +323,8 @@ func handleConn(conn net.Conn, m map[string]RedisStrValue, serverState ServerSta
 			writeConn(conn, fmt.Sprintf("FULLRESYNC %s 0", serverState.master_replid))
 			fmt.Printf("start empty rdb write: %s\n", conn.RemoteAddr())
 			writeEmptyRdbFile(conn)
-			serverState.slave_addrs = append(serverState.slave_addrs, conn.RemoteAddr().String())
-			fmt.Printf("%v\n", serverState.slave_addrs)
+			serverState.slave_conns = append(serverState.slave_conns, conn)
+
 		case "set":
 			if !(num_params == 3 || num_params == 5) {
 				fmt.Println("invalid # of params for set command")
@@ -423,7 +416,7 @@ type ServerState struct {
 	role               string
 	master_replid      string
 	master_repl_offset string
-	slave_addrs        []string
+	slave_conns        []net.Conn
 }
 
 func main() {
